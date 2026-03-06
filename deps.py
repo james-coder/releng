@@ -7,6 +7,7 @@ import dataclasses
 from dataclasses import dataclass, field
 from enum import Enum
 import graphlib
+import hashlib
 import itertools
 import json
 import os
@@ -200,13 +201,14 @@ def sync(bundle: Bundle,
             raise e
 
     try:
+        verify_bundle_checksum(url, archive_path, filename, on_progress)
+
         staging_dir = location.parent / f"_{location.name}"
         if staging_dir.exists():
             shutil.rmtree(staging_dir)
         staging_dir.mkdir(parents=True)
 
-        with tarfile.open(archive_path, "r:xz") as tar:
-            tar.extractall(staging_dir)
+        extract_tar_safely(archive_path, staging_dir)
 
         suffix_len = len(".frida.in")
         raw_location = location.as_posix()
@@ -273,9 +275,14 @@ def roll(bundle: Bundle,
                        check=True)
 
     subprocess.run(["aws", "s3", "cp", artifact, s3_url], check=True)
+    upload_bundle_checksum(artifact, s3_url)
 
-    # Use the shell for Windows compatibility, where npm generates a .bat script.
-    subprocess.run("cfcli purge " + public_url, shell=True, check=True)
+    cfcli = shutil.which("cfcli")
+    if cfcli is None:
+        cfcli = shutil.which("cfcli.cmd")
+    if cfcli is None:
+        cfcli = "cfcli"
+    subprocess.run([cfcli, "purge", public_url], check=True)
 
     if activate and bundle == Bundle.TOOLCHAIN:
         configure_bootstrap_version(version)
@@ -985,6 +992,75 @@ def compute_bundle_parameters(bundle: Bundle,
     filename = f"{bundle.name.lower()}-{os_arch_config}.tar.xz"
     url = BUNDLE_URL.format(version=version, filename=filename)
     return (url, filename)
+
+
+def extract_tar_safely(archive_path: Path, destination: Path):
+    destination_root = destination.resolve()
+    with tarfile.open(archive_path, "r:xz") as tar:
+        members = tar.getmembers()
+        for member in members:
+            if member.issym() or member.islnk():
+                raise CommandError(f"refusing to extract link entry: {member.name}")
+            if member.ischr() or member.isblk() or member.isfifo():
+                raise CommandError(f"refusing to extract special entry: {member.name}")
+
+            target_path = (destination / member.name).resolve()
+            if not target_path.is_relative_to(destination_root):
+                raise CommandError(f"refusing to extract path outside destination: {member.name}")
+
+        tar.extractall(destination, members=members)
+
+
+def verify_bundle_checksum(url: str,
+                           archive_path: Path,
+                           filename: str,
+                           on_progress: ProgressCallback):
+    checksum_url = url + ".sha256"
+    expected = fetch_bundle_checksum(checksum_url)
+    if expected is None:
+        on_progress(Progress(f"No checksum published for {filename}; proceeding with TLS-only verification"))
+        return
+
+    actual = compute_sha256(archive_path)
+    if actual != expected:
+        raise CommandError(f"checksum mismatch for {filename}: expected {expected}, got {actual}")
+
+
+def fetch_bundle_checksum(checksum_url: str) -> Optional[str]:
+    request = urllib.request.Request(checksum_url)
+    try:
+        with urllib.request.urlopen(request) as response:
+            payload = response.read().decode("utf-8", errors="replace").strip()
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        raise
+
+    if not payload:
+        raise CommandError(f"invalid checksum payload from {checksum_url}")
+
+    return payload.split()[0].lower()
+
+
+def compute_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def upload_bundle_checksum(artifact: Path, s3_url: str):
+    checksum = compute_sha256(artifact)
+    checksum_file = artifact.with_suffix(artifact.suffix + ".sha256")
+    checksum_file.write_text(f"{checksum}  {artifact.name}\n", encoding="utf-8")
+    try:
+        subprocess.run(["aws", "s3", "cp", checksum_file, s3_url + ".sha256"], check=True)
+    finally:
+        checksum_file.unlink(missing_ok=True)
 
 
 def load_dependency_parameters() -> DependencyParameters:
