@@ -2,6 +2,8 @@ from configparser import ConfigParser
 from pathlib import Path
 from typing import Dict, List, Sequence, Union
 
+from .safe_eval import evaluate_meson_value
+
 
 def load(mfile: Path) -> Dict[str, Union[str, List[str]]]:
     config = ConfigParser()
@@ -15,13 +17,13 @@ def load(mfile: Path) -> Dict[str, Union[str, List[str]]]:
     items = {}
     if config.has_section("constants"):
         for name, raw_value in config.items("constants"):
-            items[name] = eval(raw_value, hidden_constants, items)
+            items[name] = evaluate_meson_value(raw_value, {**hidden_constants, **items})
 
     for section_name, section in config.items():
         if section_name in ("DEFAULT", "constants"):
             continue
         for name, raw_value in section.items():
-            value = eval(raw_value, hidden_constants, items)
+            value = evaluate_meson_value(raw_value, {**hidden_constants, **items})
             if section_name == "binaries" and isinstance(value, str):
                 value = [value]
             items[name] = value

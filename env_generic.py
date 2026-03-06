@@ -10,6 +10,7 @@ from typing import Callable, Dict, List, Optional, Mapping, Sequence, Tuple
 from . import winenv
 from .machine_file import strv_to_meson
 from .machine_spec import MachineSpec
+from .safe_eval import evaluate_meson_value
 
 
 def init_machine_config(machine: MachineSpec,
@@ -84,7 +85,9 @@ def init_machine_config(machine: MachineSpec,
                     copy = config[section] if section in config else OrderedDict()
                     for key, val in mcfg.items(section):
                         if section == "binaries":
-                            argv = eval(val.replace("\\", "\\\\"))
+                            argv = evaluate_meson_value(val.replace("\\", "\\\\"), {})
+                            if not isinstance(argv, list) or len(argv) == 0:
+                                raise BinaryNotFoundError(f"invalid binary entry for '{key}'")
                             if not Path(argv[0]).is_absolute():
                                 path = shutil.which(argv[0])
                                 if path is None:
@@ -100,7 +103,9 @@ def init_machine_config(machine: MachineSpec,
 
                 raw_cc = binaries.get("c", None)
                 if raw_cc is not None:
-                    cc = eval(raw_cc.replace("\\", "\\\\"), None, {"common_flags": []})
+                    cc = evaluate_meson_value(raw_cc.replace("\\", "\\\\"), {"common_flags": []})
+                    if not isinstance(cc, list) or len(cc) == 0:
+                        raise BinaryNotFoundError("invalid C compiler entry")
             else:
                 diagnostics = process.stdout
 

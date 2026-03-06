@@ -35,6 +35,7 @@ from tomlkit.toml_file import TOMLFile
 from releng import env
 from releng.progress import Progress, ProgressCallback, print_progress
 from releng.machine_spec import MachineSpec
+from releng.safe_eval import evaluate_condition
 
 
 def main():
@@ -433,7 +434,7 @@ class Builder:
             "bundle": self._bundle,
             "machine": self._host_machine,
         }
-        return eval(cond, global_vars)
+        return evaluate_condition(cond, global_vars)
 
     def _prepare(self):
         self._toolchain_prefix, toolchain_state = \
